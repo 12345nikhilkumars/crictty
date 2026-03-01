@@ -4,81 +4,132 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ashish0kumar/crictty/internal/cricbuzz"
-	"github.com/ashish0kumar/crictty/internal/models"
+	"github.com/12345nikhilkumars/crictui/internal/cache"
+	"github.com/12345nikhilkumars/crictui/internal/cricbuzz"
+	"github.com/12345nikhilkumars/crictui/internal/models"
 )
 
-// App represents the main application structure
 type App struct {
-	client  *cricbuzz.Client
-	Matches []models.MatchInfo
+	client   *cricbuzz.Client
+	cache    *cache.Cache
+	Sections []models.MatchSection
 }
 
-// New initializes a new App instance with all live matches
 func New() (*App, error) {
 	client := cricbuzz.NewClient()
-	matches, err := client.GetAllLiveMatches()
+	sections, err := client.GetLiveMatchSections()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get live matches: %v", err)
+		return nil, fmt.Errorf("failed to get live match list: %v", err)
 	}
-
-	return &App{
-		client:  client,
-		Matches: matches,
-	}, nil
+	c, err := cache.New()
+	if err != nil {
+		return nil, fmt.Errorf("failed to init cache: %v", err)
+	}
+	return &App{client: client, cache: c, Sections: sections}, nil
 }
 
-// NewWithMatchID initializes a new App instance with a specific match ID
 func NewWithMatchID(matchID uint32) (*App, error) {
 	client := cricbuzz.NewClient()
-	matchInfo, err := client.GetMatchInfo(matchID)
+	info, err := client.GetMatchInfo(matchID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get match info: %v", err)
 	}
-
 	shortName := fmt.Sprintf("%s vs %s",
-		matchInfo.CricbuzzInfo.MatchHeader.Team1.ShortName,
-		matchInfo.CricbuzzInfo.MatchHeader.Team2.ShortName)
-	matchInfo.MatchShortName = shortName
-
+		info.CricbuzzInfo.MatchHeader.Team1.ShortName,
+		info.CricbuzzInfo.MatchHeader.Team2.ShortName)
+	c, err := cache.New()
+	if err != nil {
+		return nil, fmt.Errorf("failed to init cache: %v", err)
+	}
 	return &App{
-		client:  client,
-		Matches: []models.MatchInfo{matchInfo},
+		client: client,
+		cache:  c,
+		Sections: []models.MatchSection{{
+			Name:    info.CricbuzzInfo.MatchHeader.SeriesName,
+			Matches: []models.MatchListItem{{MatchID: matchID, ShortName: shortName}},
+		}},
 	}, nil
 }
 
-// UpdateMatches updates the matches in the App instance
-func (a *App) UpdateMatches() error {
-	if len(a.Matches) == 1 {
-		// Single match mode -> update the specific match
-		matchInfo, err := a.client.GetMatchInfo(a.Matches[0].CricbuzzMatchID)
-		if err != nil {
-			return err
-		}
-		matchInfo.MatchShortName = a.Matches[0].MatchShortName
-		matchInfo.LastUpdated = time.Now()
-		a.Matches[0] = matchInfo
-	} else {
-		// Multiple matches mode -> refresh all live matches
-		matches, err := a.client.GetAllLiveMatches()
-		if err != nil {
-			return err
-		}
-		for i := range matches {
-			matches[i].LastUpdated = time.Now()
-		}
-		a.Matches = matches
+func (a *App) Close() error {
+	if a.cache != nil {
+		return a.cache.Close()
 	}
 	return nil
 }
 
-// GetMatchNames returns a slice of match names formatted for display
-func (a *App) GetMatchNames() []string {
-	names := make([]string, len(a.Matches))
-	for i, match := range a.Matches {
-		names[i] = fmt.Sprintf("%s - %s",
-			match.MatchShortName,
-			match.CricbuzzInfo.MatchHeader.MatchFormat)
+func (a *App) TotalMatches() int {
+	n := 0
+	for _, s := range a.Sections {
+		n += len(s.Matches)
 	}
-	return names
+	return n
+}
+
+func (a *App) MatchAtFlatIndex(idx int) (models.MatchListItem, bool) {
+	if idx < 0 {
+		return models.MatchListItem{}, false
+	}
+	for _, s := range a.Sections {
+		if idx < len(s.Matches) {
+			return s.Matches[idx], true
+		}
+		idx -= len(s.Matches)
+	}
+	return models.MatchListItem{}, false
+}
+
+// LoadMatch fetches match info, scorecard, and over summaries (with cache).
+func (a *App) LoadMatch(matchID uint32) (models.MatchInfo, error) {
+	info, err := a.client.GetMatchInfo(matchID)
+	if err != nil {
+		return models.MatchInfo{}, err
+	}
+
+	info.OverSummaries = a.loadOverSummaries(matchID)
+	info.LastUpdated = time.Now()
+	return info, nil
+}
+
+// RefreshMatch re-fetches live data for the currently viewed match.
+func (a *App) RefreshMatch(matchID uint32) (models.MatchInfo, error) {
+	info, err := a.client.GetMatchInfo(matchID)
+	if err != nil {
+		return models.MatchInfo{}, err
+	}
+
+	info.OverSummaries = a.loadOverSummaries(matchID)
+	info.LastUpdated = time.Now()
+	return info, nil
+}
+
+// LoadCommentary fetches full commentary for a specific innings.
+func (a *App) LoadCommentary(matchID, inningsID uint32) ([]models.CommentaryEntry, error) {
+	return a.client.GetFullCommentary(matchID, inningsID)
+}
+
+// loadOverSummaries fetches over summaries, using cache for completed innings.
+func (a *App) loadOverSummaries(matchID uint32) map[uint32][]models.OverSummary {
+	fresh, err := a.client.GetOverSummaries(matchID)
+	if err != nil {
+		// Fall back to whatever is in cache
+		result := make(map[uint32][]models.OverSummary)
+		for _, innID := range []uint32{1, 2, 3, 4} {
+			if cached, ok := a.cache.GetOvers(matchID, innID); ok {
+				result[innID] = cached
+			}
+		}
+		return result
+	}
+
+	// Merge: prefer fresh data, but also pull any cached innings not in fresh
+	for _, innID := range []uint32{1, 2, 3, 4} {
+		if overs, ok := fresh[innID]; ok && len(overs) > 0 {
+			_ = a.cache.PutOvers(matchID, innID, overs)
+		} else if cached, ok := a.cache.GetOvers(matchID, innID); ok {
+			fresh[innID] = cached
+		}
+	}
+
+	return fresh
 }

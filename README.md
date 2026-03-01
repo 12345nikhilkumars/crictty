@@ -1,27 +1,8 @@
-<h1 align="center"> crictty </h1>
+<h1 align="center"> crictui </h1>
 
 <p align="center">
 Beautiful, minimal TUI cricket scorecard viewer
 </p>
-
-<div align="center" style="width: 80%; margin: auto;">
-
-<table>
-  <tr>
-    <th>1st Innings</th>
-    <th>2nd Innings</th>
-  </tr>
-  <tr>
-    <td><img src="assets/bat1.png" width="300"></td>
-    <td><img src="assets/bat2.png" width="300"></td>
-  </tr>
-  <tr>
-    <td><img src="assets/bowl1.png" width="300"></td>
-    <td><img src="assets/bowl2.png" width="300"></td>
-  </tr>
-</table>
-
-</div>
 
 ---
 
@@ -39,46 +20,46 @@ Beautiful, minimal TUI cricket scorecard viewer
 ### Nix
 
 ```bash
-nix profile install nixpkgs#crictty
+nix profile install nixpkgs#crictui
 ```
 
 ### Docker
 
 ```bash
-docker build -t crictty .
-docker run --rm -it crictty
+docker build -t crictui .
+docker run --rm -it crictui
 ```
 
 ### `go install`
 
 ```bash
-go install github.com/ashish0kumar/crictty@latest
+go install github.com/12345nikhilkumars/crictui@latest
 ```
 
 ### From Source
 
 ```bash
-git clone https://github.com/ashish0kumar/crictty.git
-cd crictty
+git clone https://github.com/12345nikhilkumars/crictui.git
+cd crictui
 go build
-sudo mv crictty /usr/local/bin/
-crictty -h
+sudo mv crictui /usr/local/bin/
+crictui -h
 ```
 
 ## Usage
 
 ```bash
 # View all live matches
-crictty
+crictui
 
 # View a specific match
-crictty --match-id 118928
+crictui --match-id 118928
 
 # Set refresh rate to 30 seconds
-crictty --tick-rate 30000
+crictui --tick-rate 30000
 
 # Show help
-crictty --help
+crictui --help
 ```
 
 > [!TIP]
@@ -99,7 +80,6 @@ crictty --help
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea) - TUI framework
 - [Lipgloss](https://github.com/charmbracelet/lipgloss) - Styling and layout
 - [Cobra](https://github.com/spf13/cobra) - CLI framework
-- [goquery](https://github.com/PuerkitoBio/goquery) - HTML parsing
 
 ## Acknowledgments
 
@@ -112,8 +92,8 @@ Contributions are always welcome! Feel free to submit a Pull Request.
 
 ## Contributors
 
-<a href="https://github.com/ashish0kumar/crictty/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=ashish0kumar/crictty" />
+<a href="https://github.com/12345nikhilkumars/crictui/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=12345nikhilkumars/crictui" />
 </a>
 
 <br><br>
@@ -123,9 +103,9 @@ Contributions are always welcome! Feel free to submit a Pull Request.
 </p>
 
 <p align="center">
-        <i><code>&copy 2025-present <a href="https://github.com/ashish0kumar">Ashish Kumar</a></code></i>
+        <i><code>&copy 2025-present <a href="https://github.com/12345nikhilkumars">12345nikhilkumars</a></code></i>
 </p>
 
 <div align="center">
-<a href="https://github.com/ashish0kumar/crictty/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ashish0kumar/crictty?style=for-the-badge&color=CBA6F7&logoColor=cdd6f4&labelColor=302D41" alt="LICENSE"></a>&nbsp;&nbsp;
+<a href="https://github.com/12345nikhilkumars/crictui/blob/main/LICENSE"><img src="https://img.shields.io/github/license/12345nikhilkumars/crictui?style=for-the-badge&color=CBA6F7&logoColor=cdd6f4&labelColor=302D41" alt="LICENSE"></a>&nbsp;&nbsp;
 </div>

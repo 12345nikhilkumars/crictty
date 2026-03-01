@@ -1,7 +1,7 @@
 # .goreleaser.yaml
 version: 1
 
-project_name: crictty
+project_name: crictui
 
 before:
   hooks:
@@ -9,9 +9,9 @@ before:
     - go mod download
 
 builds:
-  - id: crictty
+  - id: crictui
     main: ./main.go
-    binary: crictty
+    binary: crictui
     env:
       - CGO_ENABLED=0
     goos:
