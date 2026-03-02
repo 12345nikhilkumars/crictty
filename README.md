@@ -11,36 +11,30 @@ Live cricket scores in your terminal — minimal TUI for viewing scoreboards and
 - **Live cricket scores** — Real-time updates from Cricbuzz
 - **Match details** — Team scores, current batsmen, bowler figures
 - **Full scorecards** — Batting and bowling stats per innings
-- **Commentary** — Ball-by-ball commentary in the match view
-- **Innings navigation** — Switch between 1st and 2nd innings
+- **Commentary** — Ball-by-ball commentary in the match view (all innings for Tests)
+- **Innings navigation** — Switch between all innings (supports 3rd/4th in Tests)
 - **Batting / bowling toggle** — View either batting or bowling table
 - **Multi-match support** — Browse and open multiple live matches
+- **Match list summary** — Table view with **Format** (Test/ODI/T20) and **Type** (Intl/Domestic/Women)
 - **Clean layout** — Minimal, terminal-friendly design
+
+## Screenshots
+
+<p align="center">
+  <strong>Live match list</strong><br>
+  <img src="assets/Attached_image.png" alt="Live match list" />
+</p>
+
+<p align="center">
+  <strong>Scorecard and commentary</strong><br>
+  <img src="assets/Attached_image2.png" alt="Scorecard and commentary" />
+</p>
 
 ## Requirements
 
 - **Go 1.24+** (when building from source)
 
 ## Installation
-
-### Nix
-
-```bash
-nix profile install nixpkgs#crictui
-```
-
-### Docker
-
-```bash
-docker build -t crictui .
-docker run --rm -it crictui
-```
-
-### go install
-
-```bash
-go install github.com/12345nikhilkumars/crictui@latest
-```
 
 ### From source
 
@@ -88,13 +82,13 @@ crictui --help
 | Key        | Action                |
 | ---------- | --------------------- |
 | **h**      | Show help             |
-| **b** **a** | Batting scorecard     |
-| **b** **o** | Bowling scorecard     |
-| **←** **→** | Previous/next innings |
+| **b** **a** | Batting scorecard    |
+| **b** **o** | Bowling scorecard    |
+| **←** **→** | Previous/next innings (1st–4th) |
 | **↑** **↓** | Scroll commentary     |
-| **1** **2** | Jump to 1st/2nd innings |
+| **1–4**     | Jump to innings by number |
 | **Esc**    | Back to match list    |
-| **q**      | Back to list / quit    |
+| **q**      | Back to list / quit   |
 
 ## Dependencies
 
