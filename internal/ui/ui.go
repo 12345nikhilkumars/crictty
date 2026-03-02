@@ -20,7 +20,7 @@ import (
 type screen int
 
 const (
-	screenList  screen = iota
+	screenList screen = iota
 	screenMatch
 )
 
@@ -273,6 +273,15 @@ func (m Model) handleMatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if keyStr == "h" {
 		m.showHelp = true
 		return m, nil
+	}
+
+	// Manual refresh
+	if keyStr == "r" {
+		matchID := m.activeMatch.CricbuzzMatchID
+		return m, func() tea.Msg {
+			info, err := m.app.RefreshMatch(matchID)
+			return matchRefreshedMsg{match: info, err: err}
+		}
 	}
 
 	switch {
@@ -1189,6 +1198,7 @@ func justifyLine(line string, width int) string {
 
 func (m Model) renderFooter(W int) string {
 	hints := hint("h", "Help") + "  " +
+		hint("r", "Refresh") + "  " +
 		hint("ba", "Bat") + "  " +
 		hint("bo", "Bowl") + "  " +
 		hint("←→", "Innings") + "  " +
@@ -1245,6 +1255,7 @@ func (m Model) renderHelpOverlay(width int) string {
 
 	bindings := []struct{ key, desc string }{
 		{"h", "Toggle this help"},
+		{"r", "Refresh score / commentary now"},
 		{"ba", "Show batting scorecard"},
 		{"bo", "Show bowling scorecard"},
 		{"← →", "Switch innings"},

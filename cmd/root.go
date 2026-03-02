@@ -33,7 +33,7 @@ func Execute() error {
 }
 
 func init() {
-	rootCmd.Flags().IntVarP(&tickRate, "tick-rate", "t", 40000, "Sets match details refresh rate in milliseconds")
+	rootCmd.Flags().IntVarP(&tickRate, "tick-rate", "t", 10000, "Sets match details refresh rate in milliseconds")
 	rootCmd.Flags().StringVarP(&matchID, "match-id", "m", "0", "ID of the match to follow live")
 }
 

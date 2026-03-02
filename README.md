@@ -56,9 +56,9 @@ crictui
 crictui --match-id 118928
 crictui -m 118928
 
-# Set refresh interval (default: 40000 ms)
-crictui --tick-rate 30000
-crictui -t 30000
+# Set refresh interval (default: 10000 ms)
+crictui --tick-rate 10000
+crictui -t 10000
 
 # Help
 crictui --help
@@ -82,6 +82,7 @@ crictui --help
 | Key        | Action                |
 | ---------- | --------------------- |
 | **h**      | Show help             |
+| **r**      | Refresh score / commentary now |
 | **b** **a** | Batting scorecard    |
 | **b** **o** | Bowling scorecard    |
 | **←** **→** | Previous/next innings (1st–4th) |
