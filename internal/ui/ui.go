@@ -824,10 +824,11 @@ func teamBoundaryTotals(scorecard []models.MatchInningsInfo, team1Short, team2Sh
 		for _, bat := range inn.BatsmanDetails {
 			f, _ := strconv.Atoi(bat.Fours)
 			s, _ := strconv.Atoi(bat.Sixes)
-			if batTeam == team1Short {
+			switch batTeam {
+			case team1Short:
 				t1Fours += f
 				t1Sixes += s
-			} else if batTeam == team2Short {
+			case team2Short:
 				t2Fours += f
 				t2Sixes += s
 			}
