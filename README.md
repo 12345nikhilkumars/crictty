@@ -118,11 +118,11 @@ Contributions are welcome. Open an issue or submit a pull request.
 </p>
 
 <p align="center">
-  <i>© 2025–present <a href="https://github.com/12345nikhilkumars">12345nikhilkumars</a></i>
+  <i>© 2026–present <a href="https://github.com/12345nikhilkumars">12345nikhilkumars</a></i>
 </p>
 
 <div align="center">
-  <a href="https://github.com/12345nikhilkumars/crictui/blob/main/LICENSE">
+  <a href="https://github.com/12345nikhilkumars/crictty/blob/main/LICENSE">
     <img src="https://img.shields.io/github/license/12345nikhilkumars/crictui?style=for-the-badge&color=CBA6F7&logoColor=cdd6f4&labelColor=302D41" alt="License" />
   </a>
 </div>
