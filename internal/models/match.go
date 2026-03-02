@@ -27,9 +27,11 @@ type BatsmanInfo struct {
 
 // MatchInningsInfo holds all batting and bowling details for an innings
 type MatchInningsInfo struct {
-	BatsmanDetails []BatsmanInfo
-	YetToBat       string
-	BowlerDetails  []BowlerInfo
+	BatTeamShortName  string
+	BowlTeamShortName string
+	BatsmanDetails    []BatsmanInfo
+	YetToBat          string
+	BowlerDetails     []BowlerInfo
 }
 
 // CricbuzzMiniscore contains live match summary information.
@@ -134,9 +136,12 @@ type CricbuzzJSON struct {
 
 // MatchListItem is a match entry in a section list (no full details).
 type MatchListItem struct {
-	MatchID    uint32
-	ShortName  string
+	MatchID     uint32
+	ShortName   string
 	SectionName string
+	Format      string // e.g. "Test", "ODI", "T20"
+	MatchType   string // e.g. "Intl", "Domestic", "Women"
+	MiniScore   string // e.g. "401/6" or "-" when unknown
 }
 
 // MatchSection is a named group of matches (e.g. "ICC Men's T20 World Cup 2026").

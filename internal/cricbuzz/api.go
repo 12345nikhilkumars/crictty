@@ -77,6 +77,37 @@ func (c *Client) GetAllLiveMatches() ([]models.MatchInfo, error) {
 	return matches, nil
 }
 
+// deriveFormatAndType infers format (Test/ODI/T20) and match type (Intl/Domestic/Women) from section and match name.
+func deriveFormatAndType(section, matchName string) (format, matchType string) {
+	s := strings.ToLower(section + " " + matchName)
+	switch {
+	case strings.Contains(s, "t20") || strings.Contains(s, "t20i"):
+		format = "T20"
+	case strings.Contains(s, "odi") || strings.Contains(s, "one-day international") || (strings.Contains(s, "one-day") && (strings.Contains(s, "icc") || strings.Contains(s, "world cup"))):
+		format = "ODI"
+	case strings.Contains(s, "one-day") || strings.Contains(s, "one day") || strings.Contains(s, "list a"):
+		// Domestic one-day or list A → treat as ODI-format game
+		format = "ODI"
+	case strings.Contains(s, "test ") || strings.Contains(s, "test,") || strings.Contains(s, "test match"):
+		format = "Test"
+	case strings.Contains(s, "plunket") || strings.Contains(s, "shield") || strings.Contains(s, "county") ||
+		strings.Contains(s, "first-class") || strings.Contains(s, "first class") ||
+		strings.Contains(s, "ranji") || strings.Contains(s, "trophy"):
+		// Multi-day domestic comps → Test-style format
+		format = "Test"
+	default:
+		format = "-"
+	}
+	if strings.Contains(s, "women") {
+		matchType = "Women"
+	} else if strings.Contains(s, "icc") || strings.Contains(s, "world cup") || strings.Contains(s, "asia cup") || strings.Contains(s, "championship") {
+		matchType = "Intl"
+	} else {
+		matchType = "Domestic"
+	}
+	return format, matchType
+}
+
 // GetLiveMatchSections fetches the live-scores page once and returns matches grouped by section
 // (e.g. "ICC Men's T20 World Cup 2026", "CSA Provincial One-Day Challenge..."). No per-match API
 // calls — use this for a fast list; call GetMatchInfo for the selected match when needed.
@@ -184,7 +215,15 @@ func (c *Client) GetLiveMatchSections() ([]models.MatchSection, error) {
 			return
 		}
 
-		item := models.MatchListItem{MatchID: uint32(matchID), ShortName: shortName, SectionName: currentSection}
+		format, matchType := deriveFormatAndType(currentSection, shortName)
+		item := models.MatchListItem{
+			MatchID:     uint32(matchID),
+			ShortName:   shortName,
+			SectionName: currentSection,
+			Format:      format,
+			MatchType:   matchType,
+			MiniScore:   "-",
+		}
 		if len(sections) == 0 || sections[len(sections)-1].Name != currentSection {
 			sections = append(sections, models.MatchSection{Name: currentSection, Matches: []models.MatchListItem{item}})
 		} else {
@@ -253,7 +292,10 @@ func (c *Client) GetScorecard(matchID uint32) ([]models.MatchInningsInfo, error)
 
 	// Convert each innings from the JSON to MatchInningsInfo
 	for _, innings := range scorecardJSON.ScoreCard {
-		matchInnings := models.MatchInningsInfo{}
+		matchInnings := models.MatchInningsInfo{
+			BatTeamShortName:  innings.BatTeamDetails.BatTeamShortName,
+			BowlTeamShortName: innings.BowlTeamDetails.BowlTeamShortName,
+		}
 
 		// Parse batsmen data - sort by batId to maintain batting order
 		var batsmenList []models.BatsmanData

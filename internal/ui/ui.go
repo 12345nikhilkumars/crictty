@@ -27,10 +27,9 @@ const (
 type tickMsg time.Time
 
 type matchLoadedMsg struct {
-	match          models.MatchInfo
-	commentaryInn1 []models.CommentaryEntry
-	commentaryInn2 []models.CommentaryEntry
-	err            error
+	match      models.MatchInfo
+	commentary map[uint32][]models.CommentaryEntry
+	err        error
 }
 
 type matchRefreshedMsg struct {
@@ -99,16 +98,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.activeMatch = &msg.match
-		m.commentaryByInnings = make(map[uint32][]models.CommentaryEntry)
-		if len(msg.commentaryInn1) > 0 {
-			m.commentaryByInnings[1] = msg.commentaryInn1
+		m.commentaryByInnings = msg.commentary
+		if m.commentaryByInnings == nil {
+			m.commentaryByInnings = make(map[uint32][]models.CommentaryEntry)
 		}
-		if len(msg.commentaryInn2) > 0 {
-			m.commentaryByInnings[2] = msg.commentaryInn2
-		}
+		// Start on the latest innings
 		innID := uint32(1)
-		if len(m.activeMatch.CricbuzzInfo.Miniscore.MatchScoreDetails.InningsScoreList) >= 2 {
-			innID = 2
+		numInnings := len(m.activeMatch.Scorecard)
+		if numInnings > 0 {
+			innID = uint32(numInnings)
 		}
 		m.currentInnings = int(innID) - 1
 		if m.currentInnings < 0 {
@@ -190,14 +188,28 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if total == 0 {
 		return m, nil
 	}
+	keyStr := msg.String()
+	// Dynamic key jump: 1-9, 0, a-z
+	if idx := keyToIndex(keyStr); idx >= 0 && idx < total {
+		m.cursor = idx
+		m.adjustListScroll()
+		return m, nil
+	}
+	// Help
+	if keyStr == "h" {
+		m.showHelp = true
+		return m, nil
+	}
 	switch {
 	case key.Matches(msg, keyUp):
 		if m.cursor > 0 {
 			m.cursor--
+			m.adjustListScroll()
 		}
 	case key.Matches(msg, keyDown):
 		if m.cursor < total-1 {
 			m.cursor++
+			m.adjustListScroll()
 		}
 	case key.Matches(msg, keyEnter):
 		item, ok := m.app.MatchAtFlatIndex(m.cursor)
@@ -214,9 +226,22 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return matchLoadedMsg{err: err}
 			}
 			info.MatchShortName = shortName
-			comm1, _ := m.app.LoadCommentary(matchID, 1)
-			comm2, _ := m.app.LoadCommentary(matchID, 2)
-			return matchLoadedMsg{match: info, commentaryInn1: comm1, commentaryInn2: comm2}
+			commMap := make(map[uint32][]models.CommentaryEntry)
+			for i := 1; i <= len(info.Scorecard); i++ {
+				c, _ := m.app.LoadCommentary(matchID, uint32(i))
+				if len(c) > 0 {
+					commMap[uint32(i)] = c
+				}
+			}
+			if len(commMap) == 0 {
+				for _, id := range []uint32{1, 2} {
+					c, _ := m.app.LoadCommentary(matchID, id)
+					if len(c) > 0 {
+						commMap[id] = c
+					}
+				}
+			}
+			return matchLoadedMsg{match: info, commentary: commMap}
 		}
 	}
 	return m, nil
@@ -287,6 +312,14 @@ func (m *Model) syncCommentaryToInnings() {
 	innID := uint32(m.currentInnings + 1)
 	if c, ok := m.commentaryByInnings[innID]; ok {
 		m.commentary = c
+	} else if m.activeMatch != nil {
+		c, _ := m.app.LoadCommentary(m.activeMatch.CricbuzzMatchID, innID)
+		if len(c) > 0 {
+			m.commentaryByInnings[innID] = c
+			m.commentary = c
+		} else {
+			m.commentary = nil
+		}
 	} else {
 		m.commentary = nil
 	}
@@ -321,71 +354,202 @@ func (m Model) viewList() string {
 	if m.cursor >= total {
 		m.cursor = total - 1
 	}
+	if m.showHelp {
+		return m.renderListHelpOverlay()
+	}
+	return m.renderListTable()
+}
 
-	var b strings.Builder
-	b.WriteString(boldWhite.Render("  Live Cricket Matches"))
-	b.WriteString("\n\n")
-
-	visibleLines := m.height - 6
-	if visibleLines < 5 {
-		visibleLines = 20
+func (m Model) renderListTable() string {
+	total := m.app.TotalMatches()
+	if total == 0 {
+		return ""
+	}
+	W := m.width
+	if W < 60 {
+		W = 60
+	}
+	H := m.height
+	if H < 10 {
+		H = 30
 	}
 
-	type line struct {
-		text string
-		idx  int
+	px := 2
+	iW := W - px*2
+	contentW := iW - 2
+
+	const colNo = 4
+	const colKey = 5
+	const colCursor = 2
+	const colFormat = 13
+	const colType = 10
+	fixedW := colNo + colKey + colCursor + colFormat + colType + 5 // 5 spaces between 6 cols
+	nameW := contentW - fixedW - 3                                 // -3 buffer to prevent overflow
+	if nameW < 18 {
+		nameW = 18
 	}
-	var lines []line
+
+	box := dimText.Render
+	topBorder := box("┌" + strings.Repeat("─", iW-2) + "┐")
+	bottomBorder := box("└" + strings.Repeat("─", iW-2) + "┘")
+	hLine := box("├" + strings.Repeat("─", iW-2) + "┤")
+	wrap := func(s string) string { return box("│") + padToDisplayWidth(s, contentW) + box("│") }
+	// Constrain row width to prevent overflow (lipgloss truncates with ellipsis, preserves ANSI)
+	rowMaxW := lipgloss.NewStyle().MaxWidth(contentW)
+	centerWrap := func(s string) string {
+		rendered := lipgloss.NewStyle().Width(contentW).Align(lipgloss.Center).Render(s)
+		return box("│") + padToDisplayWidth(rendered, contentW) + box("│")
+	}
+
+	// Table header row
+	hdr := " " + tableHeaderStyle.Render(
+		padCol("", colCursor)+" "+
+			padCol("#", colNo)+" "+
+			padCol("Key", colKey)+" "+
+			padCol("Match", nameW)+" "+
+			padCol("Format", colFormat)+" "+
+			padCol("Type", colType))
+
+	// Data rows
+	var dataRows []string
 	fi := 0
 	for _, sec := range m.app.Sections {
-		lines = append(lines, line{text: sectionHeaderStyle.Render("  " + sec.Name), idx: -1})
 		for _, item := range sec.Matches {
-			prefix := "  "
-			style := listItemStyle
-			if fi == m.cursor {
-				prefix = "▸ "
-				style = listItemActiveStyle
+			keyLabel := indexToKey(fi)
+			if keyLabel == "" {
+				keyLabel = "-"
 			}
-			lines = append(lines, line{text: style.Render(prefix + item.ShortName), idx: fi})
+			name := item.ShortName
+			if runewidth.StringWidth(name) > nameW {
+				name = runewidth.Truncate(name, nameW, "…")
+			}
+			format := item.Format
+			if format == "" {
+				format = "-"
+			}
+			matchType := item.MatchType
+			if matchType == "" {
+				matchType = "-"
+			}
+			style := rowStyle
+			cursor := " "
+			if fi == m.cursor {
+				style = listItemActiveStyle
+				cursor = "▸"
+			}
+			row := " " + style.Render(
+				padCol(cursor, colCursor)+" "+
+					padCol(fmt.Sprintf("%d", fi+1), colNo)+" "+
+					padCol(keyLabel, colKey)+" "+
+					padCol(name, nameW)+" "+
+					padCol(format, colFormat)+" "+
+					padCol(matchType, colType))
+			dataRows = append(dataRows, row)
 			fi++
 		}
 	}
 
-	cursorLine := 0
-	for i, l := range lines {
-		if l.idx == m.cursor {
-			cursorLine = i
-			break
-		}
-	}
-	if cursorLine < m.scrollOff {
-		m.scrollOff = cursorLine
-	}
-	if cursorLine >= m.scrollOff+visibleLines {
-		m.scrollOff = cursorLine - visibleLines + 1
-	}
-	end := m.scrollOff + visibleLines
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for i := m.scrollOff; i < end; i++ {
-		b.WriteString(lines[i].text + "\n")
+	// Footer (help hints) — centered
+	footer := hint("h", "Help") + "  " + hint("↑↓", "navigate") + "  " + hint("enter", "select") + "  " + hint("1-0/a-z", "jump") + "  " + hint("q", "quit")
+
+	// Fixed lines: top(1) + title(1) + hLine(1) + header(1) + hLine(1) + hLine(1) + footer(1) + bottom(1) = 8
+	fixedLines := 8
+	bodyH := H - fixedLines - 1
+	if bodyH < 3 {
+		bodyH = 3
 	}
 
+	if m.cursor < m.scrollOff {
+		m.scrollOff = m.cursor
+	}
+	if m.cursor >= m.scrollOff+bodyH {
+		m.scrollOff = m.cursor - bodyH + 1
+	}
+	if m.scrollOff < 0 {
+		m.scrollOff = 0
+	}
+	end := m.scrollOff + bodyH
+	if end > len(dataRows) {
+		end = len(dataRows)
+	}
+
+	var out []string
+	out = append(out, topBorder)
+	out = append(out, centerWrap(boldWhite.Render("Live Cricket Matches")))
+	out = append(out, hLine)
+	out = append(out, wrap(rowMaxW.Render(hdr)))
+	out = append(out, hLine)
+
+	visibleCount := end - m.scrollOff
+	for i := m.scrollOff; i < end; i++ {
+		out = append(out, wrap(rowMaxW.Render(dataRows[i])))
+	}
+	for i := visibleCount; i < bodyH; i++ {
+		out = append(out, wrap(""))
+	}
+
+	out = append(out, hLine)
 	if m.loadingMatch {
-		b.WriteString("\n" + greenText.Render("  Loading match...") + "\n")
+		out = append(out, centerWrap(greenText.Render("Loading match...")))
+	} else if m.matchErr != "" {
+		out = append(out, centerWrap(dimText.Render("Error: "+m.matchErr)))
+	} else {
+		out = append(out, centerWrap(footer))
 	}
-	if m.matchErr != "" {
-		b.WriteString("\n" + dimText.Render("  Error: "+m.matchErr) + "\n")
+	out = append(out, bottomBorder)
+
+	view := strings.Join(out, "\n")
+	return lipgloss.NewStyle().MarginLeft(px).MarginRight(px).Render(view)
+}
+
+func padCol(s string, w int) string {
+	n := runewidth.StringWidth(s)
+	if n >= w {
+		return s
 	}
-	b.WriteString("\n" + hint("↑↓", "navigate") + "  " + hint("enter", "select") + "  " + hint("q", "quit"))
-	return b.String()
+	return s + strings.Repeat(" ", w-n)
+}
+
+func (m Model) renderListHelpOverlay() string {
+	var b strings.Builder
+	b.WriteString(boldWhite.Render("  Help — Live matches") + "\n\n")
+	bindings := []struct{ key, desc string }{
+		{"h", "Toggle this help"},
+		{"↑ ↓ / j k", "Move selection"},
+		{"1-9, 0, a-z", "Jump to match by key"},
+		{"enter", "Open selected match"},
+		{"q", "Quit"},
+	}
+	for _, bind := range bindings {
+		b.WriteString(fmt.Sprintf("  %s  %s\n", hintKeyStyle.Render(fmt.Sprintf("%-14s", bind.key)), bind.desc))
+	}
+	b.WriteString("\n" + dimText.Render("  Press any key to close"))
+	overlay := helpOverlayStyle.Render(b.String())
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay, lipgloss.WithWhitespaceChars(" "))
 }
 
 func (m Model) viewEmpty() string {
 	return "\n  No live matches found.\n\n" +
 		dimText.Render("  Use --match-id to view a specific match.") + "\n\n" +
 		dimText.Render("  Press 'q' to quit")
+}
+
+// adjustListScroll keeps the list scroll offset so the cursor stays visible.
+func (m *Model) adjustListScroll() {
+	visibleLines := m.height - 6
+	if visibleLines < 5 {
+		visibleLines = 20
+	}
+	cursorLine := m.cursor + 2
+	if cursorLine < m.scrollOff {
+		m.scrollOff = cursorLine
+	}
+	if cursorLine >= m.scrollOff+visibleLines {
+		m.scrollOff = cursorLine - visibleLines + 1
+	}
+	if m.scrollOff < 0 {
+		m.scrollOff = 0
+	}
 }
 
 // ── Match View ─────────────────────────────────────────────────
@@ -478,6 +642,9 @@ func (m Model) renderHeader(match models.MatchInfo, W int) string {
 	if len(sd.InningsScoreList) > 0 {
 		type sb struct{ score, extra string }
 		var blocks []sb
+		team1Short := hdr.Team1.ShortName
+		team2Short := hdr.Team2.ShortName
+		t1Fours, t1Sixes, t2Fours, t2Sixes := teamBoundaryTotals(match.Scorecard, team1Short, team2Short)
 		for i, inn := range sd.InningsScoreList {
 			s := fmtInningsScore(inn)
 			f, x := inningsBoundaryTotals(match.Scorecard, i)
@@ -485,6 +652,15 @@ func (m Model) renderHeader(match models.MatchInfo, W int) string {
 				score: cyanText.Render(s),
 				extra: dimText.Render(fmt.Sprintf("4s: %d | 6s: %d", f, x)),
 			})
+		}
+		// For Test matches (4+ innings), use team-aggregated 4s/6s across all innings
+		if len(match.Scorecard) > 2 {
+			if len(blocks) >= 1 {
+				blocks[0].extra = dimText.Render(fmt.Sprintf("4s: %d | 6s: %d", t1Fours, t1Sixes))
+			}
+			if len(blocks) >= 2 {
+				blocks[1].extra = dimText.Render(fmt.Sprintf("4s: %d | 6s: %d", t2Fours, t2Sixes))
+			}
 		}
 		if len(blocks) == 1 {
 			rows = append(rows, indent+blocks[0].score+rightPad)
@@ -632,6 +808,25 @@ func inningsBoundaryTotals(scorecard []models.MatchInningsInfo, idx int) (fours,
 	return
 }
 
+// teamBoundaryTotals returns 4s and 6s aggregated across all innings for each team (for Test matches).
+func teamBoundaryTotals(scorecard []models.MatchInningsInfo, team1Short, team2Short string) (t1Fours, t1Sixes, t2Fours, t2Sixes int) {
+	for _, inn := range scorecard {
+		batTeam := inn.BatTeamShortName
+		for _, bat := range inn.BatsmanDetails {
+			f, _ := strconv.Atoi(bat.Fours)
+			s, _ := strconv.Atoi(bat.Sixes)
+			if batTeam == team1Short {
+				t1Fours += f
+				t1Sixes += s
+			} else if batTeam == team2Short {
+				t2Fours += f
+				t2Sixes += s
+			}
+		}
+	}
+	return
+}
+
 // ── Left pane: Scorecard ───────────────────────────────────────
 
 func (m Model) renderScorecard(match models.MatchInfo, w, h int) string {
@@ -641,33 +836,41 @@ func (m Model) renderScorecard(match models.MatchInfo, w, h int) string {
 
 	var b strings.Builder
 
-	// 4-column single row table: 1st | 2nd | Bat | Bowl (justified across width, no button borders)
-	colW := w / 4
+	numInnings := len(match.Scorecard)
+	// Innings tabs: one per available innings + Bat/Bowl toggle
+	tabCount := numInnings + 2
+	colW := w / tabCount
 	if colW < 3 {
 		colW = 3
 	}
 	colStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center)
 
-	labels := []string{"1st", "2nd", "Bat", "Bowl"}
-	active := []bool{
-		m.currentInnings == 0,
-		m.currentInnings == 1,
-		!m.showBowling,
-		m.showBowling,
-	}
 	var cells []string
-	for i := 0; i < 4; i++ {
-		cell := labels[i]
-		if active[i] {
-			cell = boldWhite.Render(cell)
-		} else {
-			cell = dimText.Render(cell)
+	for i := 0; i < numInnings; i++ {
+		batTeam := match.Scorecard[i].BatTeamShortName
+		if batTeam == "" {
+			batTeam = "?"
 		}
-		cells = append(cells, colStyle.Render(cell))
+		label := ordinal(i+1) + " (" + batTeam + ")"
+		if m.currentInnings == i {
+			cells = append(cells, colStyle.Render(boldWhite.Render(label)))
+		} else {
+			cells = append(cells, colStyle.Render(dimText.Render(label)))
+		}
 	}
+	batLabel := "Bat"
+	bowlLabel := "Bowl"
+	if !m.showBowling {
+		batLabel = boldWhite.Render(batLabel)
+		bowlLabel = dimText.Render(bowlLabel)
+	} else {
+		batLabel = dimText.Render(batLabel)
+		bowlLabel = boldWhite.Render(bowlLabel)
+	}
+	cells = append(cells, colStyle.Render(batLabel))
+	cells = append(cells, colStyle.Render(bowlLabel))
 	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Center, cells...) + "\n")
 
-	// Horizontal line between buttons row and batsman table
 	b.WriteString(dimText.Render(strings.Repeat("─", w)) + "\n")
 
 	tw := w - 1
@@ -676,6 +879,20 @@ func (m Model) renderScorecard(match models.MatchInfo, w, h int) string {
 	}
 
 	innings := match.Scorecard[m.currentInnings]
+	batTeam := innings.BatTeamShortName
+	bowlTeam := innings.BowlTeamShortName
+	if batTeam == "" {
+		batTeam = "?"
+	}
+	if bowlTeam == "" {
+		bowlTeam = "?"
+	}
+	if m.showBowling {
+		b.WriteString(dimText.Render(" Bowling: "+bowlTeam) + "\n")
+	} else {
+		b.WriteString(dimText.Render(" Batting: "+batTeam) + "\n")
+	}
+	b.WriteString(dimText.Render(strings.Repeat("─", tw)) + "\n")
 	if m.showBowling {
 		b.WriteString(renderBowlingTable(innings.BowlerDetails, tw))
 	} else {
@@ -764,6 +981,12 @@ func (m Model) renderCommentaryPane(w, h int) string {
 	var b strings.Builder
 
 	innLabel := ordinal(m.currentInnings+1) + " Innings"
+	if m.activeMatch != nil && m.currentInnings < len(m.activeMatch.Scorecard) {
+		batTeam := m.activeMatch.Scorecard[m.currentInnings].BatTeamShortName
+		if batTeam != "" {
+			innLabel = innLabel + " (" + batTeam + ")"
+		}
+	}
 	b.WriteString(" " + boldWhite.Render("Commentary") + "  " + dimText.Render(innLabel) + "\n")
 
 	if len(m.commentary) == 0 {
@@ -977,6 +1200,41 @@ func (m Model) renderFooter(W int) string {
 
 func hint(k, label string) string {
 	return hintKeyStyle.Render("("+k+")") + " " + hintLabelStyle.Render(label)
+}
+
+// indexToKey returns the key label for the given flat match index (1-9, 0, a-z).
+func indexToKey(idx int) string {
+	if idx < 0 {
+		return ""
+	}
+	if idx <= 8 {
+		return string(rune('1' + idx))
+	}
+	if idx == 9 {
+		return "0"
+	}
+	if idx <= 35 {
+		return string(rune('a' + idx - 10))
+	}
+	return ""
+}
+
+// keyToIndex returns the flat match index for a key (1-9 -> 0-8, 0 -> 9, a-z -> 10-35), or -1 if invalid.
+func keyToIndex(k string) int {
+	if len(k) != 1 {
+		return -1
+	}
+	c := k[0]
+	if c >= '1' && c <= '9' {
+		return int(c - '1')
+	}
+	if c == '0' {
+		return 9
+	}
+	if c >= 'a' && c <= 'z' {
+		return 10 + int(c-'a')
+	}
+	return -1
 }
 
 // ── Help Overlay ───────────────────────────────────────────────

@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/12345nikhilkumars/crictui/internal/cache"
@@ -41,14 +42,55 @@ func NewWithMatchID(matchID uint32) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init cache: %v", err)
 	}
+	format := info.CricbuzzInfo.MatchHeader.MatchFormat
+	if format == "" {
+		format = "-"
+	} else {
+		format = normalizeFormat(format)
+	}
+	matchType := "Domestic"
+	if !info.CricbuzzInfo.MatchHeader.Domestic {
+		matchType = "Intl"
+	}
+	miniScore := "-"
+	if len(info.CricbuzzInfo.Miniscore.MatchScoreDetails.InningsScoreList) > 0 {
+		inn := info.CricbuzzInfo.Miniscore.MatchScoreDetails.InningsScoreList[len(info.CricbuzzInfo.Miniscore.MatchScoreDetails.InningsScoreList)-1]
+		miniScore = fmt.Sprintf("%d/%d", inn.Score, inn.Wickets)
+	}
 	return &App{
 		client: client,
 		cache:  c,
 		Sections: []models.MatchSection{{
-			Name:    info.CricbuzzInfo.MatchHeader.SeriesName,
-			Matches: []models.MatchListItem{{MatchID: matchID, ShortName: shortName}},
+			Name: info.CricbuzzInfo.MatchHeader.SeriesName,
+			Matches: []models.MatchListItem{{
+				MatchID:      matchID,
+				ShortName:   shortName,
+				SectionName: info.CricbuzzInfo.MatchHeader.SeriesName,
+				Format:      format,
+				MatchType:   matchType,
+				MiniScore:   miniScore,
+			}},
 		}},
 	}, nil
+}
+
+func normalizeFormat(f string) string {
+	switch strings.ToUpper(strings.TrimSpace(f)) {
+	case "TEST":
+		return "Test"
+	case "ODI":
+		return "ODI"
+	case "T20", "T20I":
+		return "T20"
+	case "FC", "FIRST CLASS", "FIRST-CLASS":
+		// First-class multi-day games should appear under Test-style format
+		return "Test"
+	case "LIST A", "LISTA":
+		// List A one-day games should appear under ODI-style format
+		return "ODI"
+	default:
+		return f
+	}
 }
 
 func (a *App) Close() error {

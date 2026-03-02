@@ -17,15 +17,6 @@ var (
 		Padding(0, 0).
 		MarginRight(1)
 
-	sectionHeaderStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("3")).
-				MarginTop(1)
-
-	listItemStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("250")).
-			PaddingLeft(2)
-
 	listItemActiveStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("15")).
 				Bold(true).
