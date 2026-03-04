@@ -127,17 +127,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd(m.tickRate)
 	case commentaryLoadedMsg:
 		if msg.err == nil {
-			m.commentary = msg.entries
-			m.commentaryScroll = 0
+			if m.commentaryByInnings == nil {
+				m.commentaryByInnings = make(map[uint32][]models.CommentaryEntry)
+			}
+			// Cache commentary for this innings
+			m.commentaryByInnings[msg.inningsID] = msg.entries
+			// If this is the currently viewed innings, update the visible commentary
+			if uint32(m.currentInnings+1) == msg.inningsID {
+				m.commentary = msg.entries
+				m.commentaryScroll = 0
+			}
 		}
 		return m, nil
 	case tickMsg:
 		if m.screen == screenMatch && m.activeMatch != nil {
 			matchID := m.activeMatch.CricbuzzMatchID
-			return m, func() tea.Msg {
-				info, err := m.app.RefreshMatch(matchID)
-				return matchRefreshedMsg{match: info, err: err}
-			}
+			innID := uint32(m.currentInnings + 1)
+			return m, tea.Batch(
+				func() tea.Msg {
+					info, err := m.app.RefreshMatch(matchID)
+					return matchRefreshedMsg{match: info, err: err}
+				},
+				func() tea.Msg {
+					entries, err := m.app.LoadCommentary(matchID, innID)
+					return commentaryLoadedMsg{entries: entries, inningsID: innID, err: err}
+				},
+			)
 		}
 		return m, nil
 	}
@@ -278,10 +293,17 @@ func (m Model) handleMatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Manual refresh
 	if keyStr == "r" {
 		matchID := m.activeMatch.CricbuzzMatchID
-		return m, func() tea.Msg {
-			info, err := m.app.RefreshMatch(matchID)
-			return matchRefreshedMsg{match: info, err: err}
-		}
+		innID := uint32(m.currentInnings + 1)
+		return m, tea.Batch(
+			func() tea.Msg {
+				info, err := m.app.RefreshMatch(matchID)
+				return matchRefreshedMsg{match: info, err: err}
+			},
+			func() tea.Msg {
+				entries, err := m.app.LoadCommentary(matchID, innID)
+				return commentaryLoadedMsg{entries: entries, inningsID: innID, err: err}
+			},
+		)
 	}
 
 	switch {
