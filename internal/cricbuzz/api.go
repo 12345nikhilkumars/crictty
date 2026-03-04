@@ -240,6 +240,31 @@ func (c *Client) GetLiveMatchSections() ([]models.MatchSection, error) {
 		}
 
 		format, matchType := deriveFormatAndType(currentSection, shortName, title)
+
+		// If we still couldn't detect the format (e.g. some T20Is), fall back to the match API once
+		// for this match and derive from Cricbuzz's structured header.
+		if format == "-" {
+			if info, err := c.GetMatchInfo(uint32(matchID)); err == nil {
+				hdr := info.CricbuzzInfo.MatchHeader
+				switch strings.ToUpper(strings.TrimSpace(hdr.MatchFormat)) {
+				case "T20", "T20I":
+					format = "T20"
+				case "ODI":
+					format = "ODI"
+				case "TEST":
+					format = "Test"
+				}
+				// Trust header fields more than HTML heuristics for match type.
+				lowerType := strings.ToLower(hdr.MatchType)
+				if strings.Contains(lowerType, "women") {
+					matchType = "Women"
+				} else if !hdr.Domestic {
+					matchType = "International"
+				} else if matchType == "" {
+					matchType = "Domestic"
+				}
+			}
+		}
 		item := models.MatchListItem{
 			MatchID:     uint32(matchID),
 			ShortName:   shortName,
