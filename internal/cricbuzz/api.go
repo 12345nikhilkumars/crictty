@@ -77,11 +77,13 @@ func (c *Client) GetAllLiveMatches() ([]models.MatchInfo, error) {
 	return matches, nil
 }
 
-// deriveFormatAndType infers format (Test/ODI/T20) and match type (Intl/Domestic/Women) from section and match name.
-func deriveFormatAndType(section, matchName string) (format, matchType string) {
-	s := strings.ToLower(section + " " + matchName)
+// deriveFormatAndType infers format (Test/ODI/T20) and match type (International/Domestic/Women)
+// from section, match name and the original title attribute.
+func deriveFormatAndType(section, matchName, title string) (format, matchType string) {
+	s := strings.ToLower(section + " " + matchName + " " + title)
 	switch {
-	case strings.Contains(s, "t20") || strings.Contains(s, "t20i"):
+	case strings.Contains(s, "t20") || strings.Contains(s, "t20i") ||
+		strings.Contains(s, "twenty20") || strings.Contains(s, "twenty 20"):
 		format = "T20"
 	case strings.Contains(s, "odi") || strings.Contains(s, "one-day international") || (strings.Contains(s, "one-day") && (strings.Contains(s, "icc") || strings.Contains(s, "world cup"))):
 		format = "ODI"
@@ -98,14 +100,36 @@ func deriveFormatAndType(section, matchName string) (format, matchType string) {
 	default:
 		format = "-"
 	}
-	if strings.Contains(s, "women") {
-		matchType = "Women"
-	} else if strings.Contains(s, "icc") || strings.Contains(s, "world cup") || strings.Contains(s, "asia cup") || strings.Contains(s, "championship") {
-		matchType = "Intl"
-	} else {
-		matchType = "Domestic"
-	}
+	matchType = classifyMatchType(s)
 	return format, matchType
+}
+
+// classifyMatchType tries to distinguish International, Domestic, and Women matches.
+func classifyMatchType(s string) string {
+	if strings.Contains(s, "women") || strings.Contains(s, "women's") {
+		return "Women"
+	}
+	if strings.Contains(s, "icc") || strings.Contains(s, "world cup") ||
+		strings.Contains(s, "asia cup") || strings.Contains(s, "championship") {
+		return "International"
+	}
+
+	countryKeywords := []string{
+		"india", "australia", "new zealand", "south africa", "england",
+		"pakistan", "sri lanka", "bangladesh", "afghanistan", "west indies",
+		"ireland", "zimbabwe", "netherlands", "scotland", "namibia",
+		"nepal", "uae", "united arab emirates", "oman", "usa",
+	}
+	count := 0
+	for _, kw := range countryKeywords {
+		if strings.Contains(s, kw) {
+			count++
+		}
+	}
+	if count >= 2 {
+		return "International"
+	}
+	return "Domestic"
 }
 
 // GetLiveMatchSections fetches the live-scores page once and returns matches grouped by section
@@ -215,7 +239,7 @@ func (c *Client) GetLiveMatchSections() ([]models.MatchSection, error) {
 			return
 		}
 
-		format, matchType := deriveFormatAndType(currentSection, shortName)
+		format, matchType := deriveFormatAndType(currentSection, shortName, title)
 		item := models.MatchListItem{
 			MatchID:     uint32(matchID),
 			ShortName:   shortName,

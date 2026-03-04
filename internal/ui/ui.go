@@ -412,8 +412,8 @@ func (m Model) renderListTable() string {
 	const colNo = 4
 	const colKey = 5
 	const colCursor = 2
-	const colFormat = 13
-	const colType = 10
+	const colFormat = 11
+	const colType = 13
 	fixedW := colNo + colKey + colCursor + colFormat + colType + 5 // 5 spaces between 6 cols
 	nameW := contentW - fixedW - 3                                 // -3 buffer to prevent overflow
 	if nameW < 18 {
