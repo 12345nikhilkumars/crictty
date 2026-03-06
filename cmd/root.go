@@ -17,6 +17,12 @@ var (
 	matchID  string
 )
 
+const (
+	defaultTickRateMs = 10000
+	minTickRateMs     = 250
+	maxTickRateMs     = 300000
+)
+
 var rootCmd = &cobra.Command{
 	Use:   "crictui",
 	Short: "Live cricket scores in your terminal",
@@ -33,11 +39,15 @@ func Execute() error {
 }
 
 func init() {
-	rootCmd.Flags().IntVarP(&tickRate, "tick-rate", "t", 10000, "Sets match details refresh rate in milliseconds")
+	rootCmd.Flags().IntVarP(&tickRate, "tick-rate", "t", defaultTickRateMs, "Sets match details refresh rate in milliseconds")
 	rootCmd.Flags().StringVarP(&matchID, "match-id", "m", "0", "ID of the match to follow live")
 }
 
 func runCrictui(cmd *cobra.Command, args []string) error {
+	if err := validateTickRate(tickRate); err != nil {
+		return err
+	}
+
 	if matchID != "0" && !isValidMatchID(matchID) {
 		return fmt.Errorf("invalid match ID format")
 	}
@@ -46,17 +56,22 @@ func runCrictui(cmd *cobra.Command, args []string) error {
 	defer fmt.Print("\033[?25h")
 
 	fmt.Print("\nFetching live matches")
-	done := make(chan bool)
+	done := make(chan struct{})
+	spinnerStopped := make(chan struct{})
 	go func() {
+		defer close(spinnerStopped)
+		frames := []rune(`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`)
+		i := 0
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-done:
 				return
-			default:
-				for _, r := range `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` {
-					fmt.Printf("\rFetching live matches %c", r)
-					time.Sleep(100 * time.Millisecond)
-				}
+			case <-ticker.C:
+				fmt.Printf("\rFetching live matches %c", frames[i%len(frames)])
+				i++
 			}
 		}
 	}()
@@ -70,7 +85,8 @@ func runCrictui(cmd *cobra.Command, args []string) error {
 		cricketApp, err = app.NewWithMatchID(uint32(id))
 	}
 
-	done <- true
+	close(done)
+	<-spinnerStopped
 	fmt.Print("\r                                    \r")
 
 	if err != nil {
@@ -89,4 +105,17 @@ func runCrictui(cmd *cobra.Command, args []string) error {
 func isValidMatchID(id string) bool {
 	_, err := strconv.ParseUint(id, 10, 32)
 	return err == nil
+}
+
+func validateTickRate(rate int) error {
+	switch {
+	case rate <= 0:
+		return fmt.Errorf("invalid --tick-rate: must be greater than 0ms (got %dms)", rate)
+	case rate < minTickRateMs:
+		return fmt.Errorf("invalid --tick-rate: %dms is too low; minimum is %dms", rate, minTickRateMs)
+	case rate > maxTickRateMs:
+		return fmt.Errorf("invalid --tick-rate: %dms is too high; maximum is %dms", rate, maxTickRateMs)
+	default:
+		return nil
+	}
 }

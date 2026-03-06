@@ -63,7 +63,7 @@ func NewWithMatchID(matchID uint32) (*App, error) {
 		Sections: []models.MatchSection{{
 			Name: info.CricbuzzInfo.MatchHeader.SeriesName,
 			Matches: []models.MatchListItem{{
-				MatchID:      matchID,
+				MatchID:     matchID,
 				ShortName:   shortName,
 				SectionName: info.CricbuzzInfo.MatchHeader.SeriesName,
 				Format:      format,
@@ -72,6 +72,12 @@ func NewWithMatchID(matchID uint32) (*App, error) {
 			}},
 		}},
 	}, nil
+}
+
+func applyMatchRuntimeFields(info models.MatchInfo, overSummaries map[uint32][]models.OverSummary, updatedAt time.Time) models.MatchInfo {
+	info.OverSummaries = overSummaries
+	info.LastUpdated = updatedAt
+	return info
 }
 
 func normalizeFormat(f string) string {
@@ -123,26 +129,21 @@ func (a *App) MatchAtFlatIndex(idx int) (models.MatchListItem, bool) {
 
 // LoadMatch fetches match info, scorecard, and over summaries (with cache).
 func (a *App) LoadMatch(matchID uint32) (models.MatchInfo, error) {
-	info, err := a.client.GetMatchInfo(matchID)
-	if err != nil {
-		return models.MatchInfo{}, err
-	}
-
-	info.OverSummaries = a.loadOverSummaries(matchID)
-	info.LastUpdated = time.Now()
-	return info, nil
+	return a.loadMatchInfo(matchID)
 }
 
 // RefreshMatch re-fetches live data for the currently viewed match.
 func (a *App) RefreshMatch(matchID uint32) (models.MatchInfo, error) {
+	return a.loadMatchInfo(matchID)
+}
+
+func (a *App) loadMatchInfo(matchID uint32) (models.MatchInfo, error) {
 	info, err := a.client.GetMatchInfo(matchID)
 	if err != nil {
 		return models.MatchInfo{}, err
 	}
 
-	info.OverSummaries = a.loadOverSummaries(matchID)
-	info.LastUpdated = time.Now()
-	return info, nil
+	return applyMatchRuntimeFields(info, a.loadOverSummaries(matchID), time.Now()), nil
 }
 
 // LoadCommentary fetches full commentary for a specific innings.

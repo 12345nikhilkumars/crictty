@@ -3,20 +3,6 @@ package ui
 import "github.com/charmbracelet/lipgloss"
 
 var (
-	_ = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240")).
-		Padding(0, 0).
-		MarginRight(1)
-
-	_ = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("14")).
-		Foreground(lipgloss.Color("14")).
-		Bold(true).
-		Padding(0, 0).
-		MarginRight(1)
-
 	listItemActiveStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("15")).
 				Bold(true).
@@ -36,6 +22,7 @@ var (
 	commentaryWicketStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 	commentaryBoundaryStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
 	commentaryOverSepStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
+	commentaryErrorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 
 	hintKeyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
 	hintLabelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))

@@ -37,10 +37,19 @@ type matchRefreshedMsg struct {
 	err   error
 }
 
+type matchRefreshRequestedMsg struct {
+	matchID uint32
+}
+
 type commentaryLoadedMsg struct {
 	entries   []models.CommentaryEntry
 	inningsID uint32
 	err       error
+}
+
+type commentaryLoadRequestedMsg struct {
+	matchID   uint32
+	inningsID uint32
 }
 
 var (
@@ -70,6 +79,7 @@ type Model struct {
 	commentary          []models.CommentaryEntry
 	commentaryByInnings map[uint32][]models.CommentaryEntry
 	commentaryScroll    int
+	commentaryErr       string
 
 	keyBuf   string
 	tickRate int
@@ -112,47 +122,54 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentInnings < 0 {
 			m.currentInnings = 0
 		}
-		m.syncCommentaryToInnings()
+		commentaryCmd := m.syncCommentaryToInnings()
 		m.matchErr = ""
 		m.showBowling = false
 		m.showHelp = false
 		m.keyBuf = ""
 		m.screen = screenMatch
-		return m, tickCmd(m.tickRate)
+		return m, tea.Batch(tickCmd(m.tickRate), commentaryCmd)
 	case matchRefreshedMsg:
 		if msg.err == nil && m.activeMatch != nil && msg.match.CricbuzzMatchID == m.activeMatch.CricbuzzMatchID {
 			msg.match.MatchShortName = m.activeMatch.MatchShortName
 			m.activeMatch = &msg.match
 		}
 		return m, tickCmd(m.tickRate)
+	case matchRefreshRequestedMsg:
+		if m.app == nil {
+			return m, func() tea.Msg {
+				return matchRefreshedMsg{err: fmt.Errorf("match refresh unavailable")}
+			}
+		}
+		return m, refreshMatchCmd(m.app, msg.matchID)
+	case commentaryLoadRequestedMsg:
+		if m.app == nil {
+			return m, func() tea.Msg {
+				return commentaryLoadedMsg{inningsID: msg.inningsID, err: fmt.Errorf("commentary unavailable")}
+			}
+		}
+		return m, loadCommentaryCmd(m.app, msg.matchID, msg.inningsID)
 	case commentaryLoadedMsg:
-		if msg.err == nil {
-			if m.commentaryByInnings == nil {
-				m.commentaryByInnings = make(map[uint32][]models.CommentaryEntry)
-			}
-			// Cache commentary for this innings
-			m.commentaryByInnings[msg.inningsID] = msg.entries
-			// If this is the currently viewed innings, update the visible commentary
+		if msg.err != nil {
 			if uint32(m.currentInnings+1) == msg.inningsID {
-				m.commentary = msg.entries
-				m.commentaryScroll = 0
+				m.commentaryErr = fmt.Sprintf("failed to load commentary: %v", msg.err)
 			}
+			return m, nil
+		}
+		if m.commentaryByInnings == nil {
+			m.commentaryByInnings = make(map[uint32][]models.CommentaryEntry)
+		}
+		m.commentaryByInnings[msg.inningsID] = msg.entries
+		if uint32(m.currentInnings+1) == msg.inningsID {
+			m.commentary = msg.entries
+			m.commentaryScroll = 0
+			m.commentaryErr = ""
 		}
 		return m, nil
 	case tickMsg:
 		if m.screen == screenMatch && m.activeMatch != nil {
 			matchID := m.activeMatch.CricbuzzMatchID
-			innID := uint32(m.currentInnings + 1)
-			return m, tea.Batch(
-				func() tea.Msg {
-					info, err := m.app.RefreshMatch(matchID)
-					return matchRefreshedMsg{match: info, err: err}
-				},
-				func() tea.Msg {
-					entries, err := m.app.LoadCommentary(matchID, innID)
-					return commentaryLoadedMsg{entries: entries, inningsID: innID, err: err}
-				},
-			)
+			return m, requestMatchRefreshCmd(matchID)
 		}
 		return m, nil
 	}
@@ -173,6 +190,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.commentary = nil
 			m.commentaryByInnings = nil
 			m.matchErr = ""
+			m.commentaryErr = ""
 			m.keyBuf = ""
 			return m, nil
 		}
@@ -184,6 +202,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.commentary = nil
 			m.commentaryByInnings = nil
 			m.matchErr = ""
+			m.commentaryErr = ""
 			m.keyBuf = ""
 			return m, nil
 		}
@@ -241,22 +260,7 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return matchLoadedMsg{err: err}
 			}
 			info.MatchShortName = shortName
-			commMap := make(map[uint32][]models.CommentaryEntry)
-			for i := 1; i <= len(info.Scorecard); i++ {
-				c, _ := m.app.LoadCommentary(matchID, uint32(i))
-				if len(c) > 0 {
-					commMap[uint32(i)] = c
-				}
-			}
-			if len(commMap) == 0 {
-				for _, id := range []uint32{1, 2} {
-					c, _ := m.app.LoadCommentary(matchID, id)
-					if len(c) > 0 {
-						commMap[id] = c
-					}
-				}
-			}
-			return matchLoadedMsg{match: info, commentary: commMap}
+			return matchLoadedMsg{match: info}
 		}
 	}
 	return m, nil
@@ -295,27 +299,22 @@ func (m Model) handleMatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		matchID := m.activeMatch.CricbuzzMatchID
 		innID := uint32(m.currentInnings + 1)
 		return m, tea.Batch(
-			func() tea.Msg {
-				info, err := m.app.RefreshMatch(matchID)
-				return matchRefreshedMsg{match: info, err: err}
-			},
-			func() tea.Msg {
-				entries, err := m.app.LoadCommentary(matchID, innID)
-				return commentaryLoadedMsg{entries: entries, inningsID: innID, err: err}
-			},
+			requestMatchRefreshCmd(matchID),
+			loadCommentaryCmd(m.app, matchID, innID),
 		)
 	}
 
+	var cmd tea.Cmd
 	switch {
 	case key.Matches(msg, keyLeft):
 		if m.currentInnings > 0 {
 			m.currentInnings--
-			m.syncCommentaryToInnings()
+			cmd = m.syncCommentaryToInnings()
 		}
 	case key.Matches(msg, keyRight):
 		if m.currentInnings < len(m.activeMatch.Scorecard)-1 {
 			m.currentInnings++
-			m.syncCommentaryToInnings()
+			cmd = m.syncCommentaryToInnings()
 		}
 	case key.Matches(msg, keyUp):
 		if m.commentaryScroll > 0 {
@@ -328,33 +327,62 @@ func (m Model) handleMatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		if n, err := strconv.Atoi(keyStr); err == nil && n >= 1 && n <= len(m.activeMatch.Scorecard) {
 			m.currentInnings = n - 1
-			m.syncCommentaryToInnings()
+			cmd = m.syncCommentaryToInnings()
 		}
 	}
-	return m, nil
+	return m, cmd
 }
 
-func (m *Model) syncCommentaryToInnings() {
+func (m *Model) syncCommentaryToInnings() tea.Cmd {
 	if m.commentaryByInnings == nil {
-		m.commentary = nil
-		m.commentaryScroll = 0
-		return
+		m.commentaryByInnings = make(map[uint32][]models.CommentaryEntry)
 	}
 	innID := uint32(m.currentInnings + 1)
 	if c, ok := m.commentaryByInnings[innID]; ok {
 		m.commentary = c
-	} else if m.activeMatch != nil {
-		c, _ := m.app.LoadCommentary(m.activeMatch.CricbuzzMatchID, innID)
-		if len(c) > 0 {
-			m.commentaryByInnings[innID] = c
-			m.commentary = c
-		} else {
-			m.commentary = nil
-		}
+		m.commentaryErr = ""
 	} else {
 		m.commentary = nil
+		m.commentaryErr = ""
+		m.commentaryScroll = 0
+		if m.activeMatch != nil {
+			return requestCommentaryCmd(m.activeMatch.CricbuzzMatchID, innID)
+		}
 	}
 	m.commentaryScroll = 0
+	return nil
+}
+
+func requestCommentaryCmd(matchID, inningsID uint32) tea.Cmd {
+	return func() tea.Msg {
+		return commentaryLoadRequestedMsg{matchID: matchID, inningsID: inningsID}
+	}
+}
+
+func requestMatchRefreshCmd(matchID uint32) tea.Cmd {
+	return func() tea.Msg {
+		return matchRefreshRequestedMsg{matchID: matchID}
+	}
+}
+
+func refreshMatchCmd(a *app.App, matchID uint32) tea.Cmd {
+	return func() tea.Msg {
+		if a == nil {
+			return matchRefreshedMsg{err: fmt.Errorf("match refresh unavailable")}
+		}
+		info, err := a.RefreshMatch(matchID)
+		return matchRefreshedMsg{match: info, err: err}
+	}
+}
+
+func loadCommentaryCmd(a *app.App, matchID, inningsID uint32) tea.Cmd {
+	return func() tea.Msg {
+		if a == nil {
+			return commentaryLoadedMsg{inningsID: inningsID, err: fmt.Errorf("commentary unavailable")}
+		}
+		entries, err := a.LoadCommentary(matchID, inningsID)
+		return commentaryLoadedMsg{entries: entries, inningsID: inningsID, err: err}
+	}
 }
 
 func tickCmd(tickRate int) tea.Cmd {
@@ -1020,6 +1048,9 @@ func (m Model) renderCommentaryPane(w, h int) string {
 		}
 	}
 	b.WriteString(" " + boldWhite.Render("Commentary") + "  " + dimText.Render(innLabel) + "\n")
+	if m.commentaryErr != "" {
+		b.WriteString(" " + commentaryErrorStyle.Render("Commentary error: "+m.commentaryErr) + "\n")
+	}
 
 	if len(m.commentary) == 0 {
 		b.WriteString(" " + dimText.Render("No commentary available for this innings.") + "\n")
@@ -1027,6 +1058,9 @@ func (m Model) renderCommentaryPane(w, h int) string {
 	}
 
 	headerLines := 1
+	if m.commentaryErr != "" {
+		headerLines++
+	}
 	footerLines := 1
 	availH := h - headerLines - footerLines
 	if availH < 3 {
@@ -1093,11 +1127,18 @@ func (m Model) renderCommentaryPane(w, h int) string {
 var (
 	htmlTagRe = regexp.MustCompile(`<[^>]*>`)
 	b0Re      = regexp.MustCompile(`B0\$`)
+	ansiCSIRe = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	ansiOSCRe = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	c0CtrlRe  = regexp.MustCompile(`[\x00-\x08\x0B-\x1F\x7F]`)
 )
 
 func cleanCommText(raw string) string {
 	text := htmlTagRe.ReplaceAllString(raw, "")
 	text = b0Re.ReplaceAllString(text, "")
+	text = ansiOSCRe.ReplaceAllString(text, "")
+	text = ansiCSIRe.ReplaceAllString(text, "")
+	text = strings.ReplaceAll(text, "\x1b", "")
+	text = c0CtrlRe.ReplaceAllString(text, "")
 	text = strings.ReplaceAll(text, "\\n", "\n")
 	var cleaned []string
 	for _, line := range strings.Split(text, "\n") {

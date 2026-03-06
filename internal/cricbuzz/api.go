@@ -1,12 +1,15 @@
 package cricbuzz
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/12345nikhilkumars/crictui/internal/models"
@@ -25,36 +28,179 @@ const (
 
 // Client represents the Cricbuzz API client
 type Client struct {
-	httpClient *http.Client
+	httpClient       *http.Client
+	limiterMu        sync.Mutex
+	lastRequest      time.Time
+	requestInterval  time.Duration
+	maxRetries       int
+	retryBaseBackoff time.Duration
 }
 
 // NewClient initializes a new Cricbuzz API client
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{},
+		httpClient:       &http.Client{Timeout: 10 * time.Second},
+		requestInterval:  1 * time.Second,
+		maxRetries:       2,
+		retryBaseBackoff: 150 * time.Millisecond,
 	}
 }
 
-const requestInterval = 1 * time.Second
+const errorBodySnippetLimit = 256
 
-var lastRequest time.Time
+// HTTPStatusError is returned when the upstream API returns a non-success status code.
+type HTTPStatusError struct {
+	StatusCode  int
+	Status      string
+	URL         string
+	BodySnippet string
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e.BodySnippet == "" {
+		return fmt.Sprintf("http request failed: status=%d (%s) url=%s", e.StatusCode, e.Status, e.URL)
+	}
+	return fmt.Sprintf("http request failed: status=%d (%s) url=%s body=%q", e.StatusCode, e.Status, e.URL, e.BodySnippet)
+}
+
+func isTransientStatus(code int) bool {
+	return code == http.StatusTooManyRequests || (code >= 500 && code <= 599)
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func (c *Client) reserveRequestSlot() time.Duration {
+	c.limiterMu.Lock()
+	defer c.limiterMu.Unlock()
+
+	now := time.Now()
+	next := c.lastRequest
+	if c.requestInterval > 0 {
+		next = c.lastRequest.Add(c.requestInterval)
+	}
+	if now.Before(next) {
+		c.lastRequest = next
+		return next.Sub(now)
+	}
+	c.lastRequest = now
+	return 0
+}
+
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds < 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if t, err := http.ParseTime(value); err == nil {
+		d := time.Until(t)
+		if d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+func (c *Client) retryDelay(attempt int, retryAfter time.Duration) time.Duration {
+	const maxRetryDelay = 2 * time.Second
+	if retryAfter > 0 {
+		if retryAfter > maxRetryDelay {
+			return maxRetryDelay
+		}
+		return retryAfter
+	}
+	d := c.retryBaseBackoff * time.Duration(1<<attempt)
+	if d > maxRetryDelay {
+		return maxRetryDelay
+	}
+	return d
+}
+
+func validateHTTPStatus(resp *http.Response, requestURL string) error {
+	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodySnippetLimit))
+	snippet := strings.TrimSpace(strings.ReplaceAll(string(body), "\n", " "))
+	return &HTTPStatusError{
+		StatusCode:  resp.StatusCode,
+		Status:      resp.Status,
+		URL:         requestURL,
+		BodySnippet: snippet,
+	}
+}
 
 // makeRequest performs an HTTP GET request to the specified URL with rate limiting.
 func (c *Client) makeRequest(url string) (*http.Response, error) {
-	time.Sleep(time.Until(lastRequest.Add(requestInterval)))
-	lastRequest = time.Now()
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
+	return c.makeRequestWithContext(context.Background(), url)
+}
+
+func (c *Client) makeRequestWithContext(ctx context.Context, requestURL string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	return c.httpClient.Do(req)
+
+	for attempt := 0; ; attempt++ {
+		if err := sleepWithContext(ctx, c.reserveRequestSlot()); err != nil {
+			return nil, err
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if attempt < c.maxRetries {
+				if err := sleepWithContext(ctx, c.retryDelay(attempt, 0)); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			return nil, err
+		}
+
+		if isTransientStatus(resp.StatusCode) && attempt < c.maxRetries {
+			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+			resp.Body.Close()
+			if err := sleepWithContext(ctx, c.retryDelay(attempt, retryAfter)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		return resp, nil
+	}
 }
 
 // GetAllLiveMatches fetches all live and recently completed matches from the Cricbuzz live-scores page.
 // Deprecated: use GetLiveMatchSections for sectioned list and faster load (no per-match API calls).
 func (c *Client) GetAllLiveMatches() ([]models.MatchInfo, error) {
-	sections, err := c.GetLiveMatchSections()
+	return c.GetAllLiveMatchesWithContext(context.Background())
+}
+
+// GetAllLiveMatchesWithContext fetches all live and recently completed matches with context support.
+func (c *Client) GetAllLiveMatchesWithContext(ctx context.Context) ([]models.MatchInfo, error) {
+	sections, err := c.GetLiveMatchSectionsWithContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +212,7 @@ func (c *Client) GetAllLiveMatches() ([]models.MatchInfo, error) {
 				continue
 			}
 			seen[m.MatchID] = true
-			info, err := c.GetMatchInfo(m.MatchID)
+			info, err := c.GetMatchInfoWithContext(ctx, m.MatchID)
 			if err != nil {
 				continue
 			}
@@ -136,11 +282,19 @@ func classifyMatchType(s string) string {
 // (e.g. "ICC Men's T20 World Cup 2026", "CSA Provincial One-Day Challenge..."). No per-match API
 // calls — use this for a fast list; call GetMatchInfo for the selected match when needed.
 func (c *Client) GetLiveMatchSections() ([]models.MatchSection, error) {
-	resp, err := c.makeRequest(CricbuzzLiveMatchesURL)
+	return c.GetLiveMatchSectionsWithContext(context.Background())
+}
+
+// GetLiveMatchSectionsWithContext fetches grouped live matches with context support.
+func (c *Client) GetLiveMatchSectionsWithContext(ctx context.Context) ([]models.MatchSection, error) {
+	resp, err := c.makeRequestWithContext(ctx, CricbuzzLiveMatchesURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch live scores page: %v", err)
 	}
 	defer resp.Body.Close()
+	if err := validateHTTPStatus(resp, CricbuzzLiveMatchesURL); err != nil {
+		return nil, fmt.Errorf("failed to fetch live scores page: %w", err)
+	}
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
@@ -244,7 +398,7 @@ func (c *Client) GetLiveMatchSections() ([]models.MatchSection, error) {
 		// If we still couldn't detect the format (e.g. some T20Is), fall back to the match API once
 		// for this match and derive from Cricbuzz's structured header.
 		if format == "-" {
-			if info, err := c.GetMatchInfo(uint32(matchID)); err == nil {
+			if info, err := c.GetMatchInfoWithContext(ctx, uint32(matchID)); err == nil {
 				hdr := info.CricbuzzInfo.MatchHeader
 				switch strings.ToUpper(strings.TrimSpace(hdr.MatchFormat)) {
 				case "T20", "T20I":
@@ -293,22 +447,29 @@ func (c *Client) GetLiveMatchSections() ([]models.MatchSection, error) {
 
 // GetMatchInfo fetches detailed match information for a given match ID
 func (c *Client) GetMatchInfo(matchID uint32) (models.MatchInfo, error) {
+	return c.GetMatchInfoWithContext(context.Background(), matchID)
+}
+
+// GetMatchInfoWithContext fetches detailed match information for a given match ID.
+func (c *Client) GetMatchInfoWithContext(ctx context.Context, matchID uint32) (models.MatchInfo, error) {
 	// Construct the URL for the match API
 	url := fmt.Sprintf("%s%d", CricbuzzMatchAPI, matchID)
-	resp, err := c.makeRequest(url)
+	resp, err := c.makeRequestWithContext(ctx, url)
 	if err != nil {
 		return models.MatchInfo{}, fmt.Errorf("failed to fetch match info: %v", err)
 	}
 	defer resp.Body.Close()
+	if err := validateHTTPStatus(resp, url); err != nil {
+		return models.MatchInfo{}, fmt.Errorf("failed to fetch match info: %w", err)
+	}
 
-	// Check if the response status is OK
 	var cricbuzzJSON models.CricbuzzJSON
 	if err := json.NewDecoder(resp.Body).Decode(&cricbuzzJSON); err != nil {
 		return models.MatchInfo{}, fmt.Errorf("failed to decode JSON: %v", err)
 	}
 
 	// Check if the match is complete
-	scorecard, err := c.GetScorecard(matchID)
+	scorecard, err := c.GetScorecardWithContext(ctx, matchID)
 	if err != nil {
 		scorecard = []models.MatchInningsInfo{}
 	}
@@ -323,13 +484,21 @@ func (c *Client) GetMatchInfo(matchID uint32) (models.MatchInfo, error) {
 
 // GetScorecard fetches the scorecard for a given match ID
 func (c *Client) GetScorecard(matchID uint32) ([]models.MatchInningsInfo, error) {
+	return c.GetScorecardWithContext(context.Background(), matchID)
+}
+
+// GetScorecardWithContext fetches the scorecard for a given match ID with context support.
+func (c *Client) GetScorecardWithContext(ctx context.Context, matchID uint32) ([]models.MatchInningsInfo, error) {
 	// Construct the URL for the scorecard API
 	url := fmt.Sprintf("%s%d", CricbuzzMatchScorecardAPI, matchID)
-	resp, err := c.makeRequest(url)
+	resp, err := c.makeRequestWithContext(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch scorecard: %v", err)
 	}
 	defer resp.Body.Close()
+	if err := validateHTTPStatus(resp, url); err != nil {
+		return nil, fmt.Errorf("failed to fetch scorecard: %w", err)
+	}
 
 	// Parse JSON response
 	var scorecardJSON models.ScorecardJSON
@@ -406,15 +575,23 @@ func (c *Client) GetScorecard(matchID uint32) ([]models.MatchInningsInfo, error)
 // It starts with the over-refresh endpoint (recent overs) then paginates backwards
 // via the over-by-over endpoint until all overs are collected.
 func (c *Client) GetOverSummaries(matchID uint32) (map[uint32][]models.OverSummary, error) {
+	return c.GetOverSummariesWithContext(context.Background(), matchID)
+}
+
+// GetOverSummariesWithContext fetches over-by-over summaries with context support.
+func (c *Client) GetOverSummariesWithContext(ctx context.Context, matchID uint32) (map[uint32][]models.OverSummary, error) {
 	result := make(map[uint32][]models.OverSummary)
 
 	// Step 1: fetch recent overs from over-refresh
 	refreshURL := fmt.Sprintf("%s%d", CricbuzzMatchOverviewsAPI, matchID)
-	resp, err := c.makeRequest(refreshURL)
+	resp, err := c.makeRequestWithContext(ctx, refreshURL)
 	if err != nil {
 		return nil, fmt.Errorf("over-refresh request failed: %v", err)
 	}
 	defer resp.Body.Close()
+	if err := validateHTTPStatus(resp, refreshURL); err != nil {
+		return nil, fmt.Errorf("over-refresh request failed: %w", err)
+	}
 
 	var refreshResp struct {
 		OverSummaryList []models.OverSummary `json:"overSummaryList"`
@@ -442,8 +619,12 @@ func (c *Client) GetOverSummaries(matchID uint32) (map[uint32][]models.OverSumma
 	// Paginate backwards using over-by-over, starting from the earliest innings
 	nextURL := fmt.Sprintf("%s%d/%d/%d", CricbuzzOverByOverAPI, matchID, earliest.InningsID, earliest.Timestamp)
 	for nextURL != "" {
-		pResp, err := c.makeRequest(nextURL)
+		pResp, err := c.makeRequestWithContext(ctx, nextURL)
 		if err != nil {
+			break
+		}
+		if err := validateHTTPStatus(pResp, nextURL); err != nil {
+			pResp.Body.Close()
 			break
 		}
 
@@ -492,12 +673,20 @@ func (c *Client) GetOverSummaries(matchID uint32) (map[uint32][]models.OverSumma
 
 // GetFullCommentary fetches the complete ball-by-ball commentary for a single innings.
 func (c *Client) GetFullCommentary(matchID uint32, inningsID uint32) ([]models.CommentaryEntry, error) {
+	return c.GetFullCommentaryWithContext(context.Background(), matchID, inningsID)
+}
+
+// GetFullCommentaryWithContext fetches complete ball-by-ball commentary for a single innings.
+func (c *Client) GetFullCommentaryWithContext(ctx context.Context, matchID uint32, inningsID uint32) ([]models.CommentaryEntry, error) {
 	url := fmt.Sprintf("%s/api/mcenter/%d/full-commentary/%d", CricbuzzBaseAPI, matchID, inningsID)
-	resp, err := c.makeRequest(url)
+	resp, err := c.makeRequestWithContext(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("full-commentary request failed: %v", err)
 	}
 	defer resp.Body.Close()
+	if err := validateHTTPStatus(resp, url); err != nil {
+		return nil, fmt.Errorf("full-commentary request failed: %w", err)
+	}
 
 	// overNumber can be number (e.g. 19.6) or string in API response
 	var raw struct {
