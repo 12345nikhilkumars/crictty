@@ -1,8 +1,10 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/12345nikhilkumars/crictui/internal/cache"
@@ -10,10 +12,36 @@ import (
 	"github.com/12345nikhilkumars/crictui/internal/models"
 )
 
+const defaultCommentaryTTL = 8 * time.Second
+
+type matchDataClient interface {
+	GetLiveMatchSections() ([]models.MatchSection, error)
+	GetMatchInfo(matchID uint32) (models.MatchInfo, error)
+	GetMatchInfoWithContext(ctx context.Context, matchID uint32) (models.MatchInfo, error)
+	GetOverSummaries(matchID uint32) (map[uint32][]models.OverSummary, error)
+	GetOverSummariesWithContext(ctx context.Context, matchID uint32) (map[uint32][]models.OverSummary, error)
+	GetFullCommentary(matchID, inningsID uint32) ([]models.CommentaryEntry, error)
+	GetFullCommentaryWithContext(ctx context.Context, matchID, inningsID uint32) ([]models.CommentaryEntry, error)
+}
+
+type commentaryCacheKey struct {
+	matchID   uint32
+	inningsID uint32
+}
+
+type commentaryCacheEntry struct {
+	entries   []models.CommentaryEntry
+	expiresAt time.Time
+}
+
 type App struct {
-	client   *cricbuzz.Client
+	client   matchDataClient
 	cache    *cache.Cache
 	Sections []models.MatchSection
+
+	commentaryTTL   time.Duration
+	commentaryMu    sync.RWMutex
+	commentaryCache map[commentaryCacheKey]commentaryCacheEntry
 }
 
 func New() (*App, error) {
@@ -26,7 +54,13 @@ func New() (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init cache: %v", err)
 	}
-	return &App{client: client, cache: c, Sections: sections}, nil
+	return &App{
+		client:          client,
+		cache:           c,
+		Sections:        sections,
+		commentaryTTL:   defaultCommentaryTTL,
+		commentaryCache: make(map[commentaryCacheKey]commentaryCacheEntry),
+	}, nil
 }
 
 func NewWithMatchID(matchID uint32) (*App, error) {
@@ -71,6 +105,8 @@ func NewWithMatchID(matchID uint32) (*App, error) {
 				MiniScore:   miniScore,
 			}},
 		}},
+		commentaryTTL:   defaultCommentaryTTL,
+		commentaryCache: make(map[commentaryCacheKey]commentaryCacheEntry),
 	}, nil
 }
 
@@ -129,34 +165,90 @@ func (a *App) MatchAtFlatIndex(idx int) (models.MatchListItem, bool) {
 
 // LoadMatch fetches match info, scorecard, and over summaries (with cache).
 func (a *App) LoadMatch(matchID uint32) (models.MatchInfo, error) {
-	return a.loadMatchInfo(matchID)
+	return a.LoadMatchWithContext(context.Background(), matchID)
 }
 
 // RefreshMatch re-fetches live data for the currently viewed match.
 func (a *App) RefreshMatch(matchID uint32) (models.MatchInfo, error) {
-	return a.loadMatchInfo(matchID)
+	return a.RefreshMatchWithContext(context.Background(), matchID)
 }
 
-func (a *App) loadMatchInfo(matchID uint32) (models.MatchInfo, error) {
-	info, err := a.client.GetMatchInfo(matchID)
+// LoadMatchWithContext fetches match info with context cancellation support.
+func (a *App) LoadMatchWithContext(ctx context.Context, matchID uint32) (models.MatchInfo, error) {
+	return a.loadMatchInfoWithContext(ctx, matchID)
+}
+
+// RefreshMatchWithContext re-fetches live data with context cancellation support.
+func (a *App) RefreshMatchWithContext(ctx context.Context, matchID uint32) (models.MatchInfo, error) {
+	return a.loadMatchInfoWithContext(ctx, matchID)
+}
+
+func (a *App) loadMatchInfoWithContext(ctx context.Context, matchID uint32) (models.MatchInfo, error) {
+	if a.client == nil {
+		return models.MatchInfo{}, fmt.Errorf("match client is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	info, err := a.client.GetMatchInfoWithContext(ctx, matchID)
 	if err != nil {
 		return models.MatchInfo{}, err
 	}
 
-	return applyMatchRuntimeFields(info, a.loadOverSummaries(matchID), time.Now()), nil
+	return applyMatchRuntimeFields(info, a.loadOverSummariesWithContext(ctx, matchID), time.Now()), nil
 }
 
 // LoadCommentary fetches full commentary for a specific innings.
 func (a *App) LoadCommentary(matchID, inningsID uint32) ([]models.CommentaryEntry, error) {
-	return a.client.GetFullCommentary(matchID, inningsID)
+	return a.LoadCommentaryWithContext(context.Background(), matchID, inningsID)
+}
+
+// LoadCommentaryWithContext fetches full commentary with short-lived caching.
+func (a *App) LoadCommentaryWithContext(ctx context.Context, matchID, inningsID uint32) ([]models.CommentaryEntry, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("match client is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	key := commentaryCacheKey{matchID: matchID, inningsID: inningsID}
+	now := time.Now()
+	if entries, ok := a.getCachedCommentary(key, now); ok {
+		return entries, nil
+	}
+
+	entries, err := a.client.GetFullCommentaryWithContext(ctx, matchID, inningsID)
+	if err != nil {
+		return nil, err
+	}
+	if a.commentaryTTL > 0 {
+		a.setCachedCommentary(key, entries, now.Add(a.commentaryTTL))
+	}
+	return cloneCommentaryEntries(entries), nil
 }
 
 // loadOverSummaries fetches over summaries, using cache for completed innings.
 func (a *App) loadOverSummaries(matchID uint32) map[uint32][]models.OverSummary {
-	fresh, err := a.client.GetOverSummaries(matchID)
+	return a.loadOverSummariesWithContext(context.Background(), matchID)
+}
+
+func (a *App) loadOverSummariesWithContext(ctx context.Context, matchID uint32) map[uint32][]models.OverSummary {
+	if a.client == nil {
+		return map[uint32][]models.OverSummary{}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	fresh, err := a.client.GetOverSummariesWithContext(ctx, matchID)
 	if err != nil {
 		// Fall back to whatever is in cache
 		result := make(map[uint32][]models.OverSummary)
+		if a.cache == nil {
+			return result
+		}
 		for _, innID := range []uint32{1, 2, 3, 4} {
 			if cached, ok := a.cache.GetOvers(matchID, innID); ok {
 				result[innID] = cached
@@ -166,6 +258,9 @@ func (a *App) loadOverSummaries(matchID uint32) map[uint32][]models.OverSummary 
 	}
 
 	// Merge: prefer fresh data, but also pull any cached innings not in fresh
+	if a.cache == nil {
+		return fresh
+	}
 	for _, innID := range []uint32{1, 2, 3, 4} {
 		if overs, ok := fresh[innID]; ok && len(overs) > 0 {
 			_ = a.cache.PutOvers(matchID, innID, overs)
@@ -175,4 +270,37 @@ func (a *App) loadOverSummaries(matchID uint32) map[uint32][]models.OverSummary 
 	}
 
 	return fresh
+}
+
+func cloneCommentaryEntries(entries []models.CommentaryEntry) []models.CommentaryEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([]models.CommentaryEntry, len(entries))
+	copy(cloned, entries)
+	return cloned
+}
+
+func (a *App) getCachedCommentary(key commentaryCacheKey, now time.Time) ([]models.CommentaryEntry, bool) {
+	a.commentaryMu.RLock()
+	entry, ok := a.commentaryCache[key]
+	a.commentaryMu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if now.After(entry.expiresAt) {
+		a.commentaryMu.Lock()
+		if cur, exists := a.commentaryCache[key]; exists && now.After(cur.expiresAt) {
+			delete(a.commentaryCache, key)
+		}
+		a.commentaryMu.Unlock()
+		return nil, false
+	}
+	return cloneCommentaryEntries(entry.entries), true
+}
+
+func (a *App) setCachedCommentary(key commentaryCacheKey, entries []models.CommentaryEntry, expiresAt time.Time) {
+	a.commentaryMu.Lock()
+	a.commentaryCache[key] = commentaryCacheEntry{entries: cloneCommentaryEntries(entries), expiresAt: expiresAt}
+	a.commentaryMu.Unlock()
 }

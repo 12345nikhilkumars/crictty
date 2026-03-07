@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -27,9 +29,13 @@ const (
 type tickMsg time.Time
 
 type matchLoadedMsg struct {
-	match      models.MatchInfo
-	commentary map[uint32][]models.CommentaryEntry
-	err        error
+	match models.MatchInfo
+	err   error
+}
+
+type matchLoadRequestedMsg struct {
+	matchID   uint32
+	shortName string
 }
 
 type matchRefreshedMsg struct {
@@ -85,6 +91,10 @@ type Model struct {
 	tickRate int
 	width    int
 	height   int
+
+	matchLoadCancel    context.CancelFunc
+	matchRefreshCancel context.CancelFunc
+	commentaryCancel   context.CancelFunc
 }
 
 func NewModel(a *app.App, tickRate int) Model {
@@ -102,16 +112,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case matchLoadedMsg:
+		m.matchLoadCancel = nil
 		m.loadingMatch = false
 		if msg.err != nil {
+			if errors.Is(msg.err, context.Canceled) {
+				return m, nil
+			}
 			m.matchErr = msg.err.Error()
 			return m, nil
 		}
+		m.cancelMatchRequests()
 		m.activeMatch = &msg.match
-		m.commentaryByInnings = msg.commentary
-		if m.commentaryByInnings == nil {
-			m.commentaryByInnings = make(map[uint32][]models.CommentaryEntry)
-		}
+		m.commentary = nil
+		m.commentaryByInnings = make(map[uint32][]models.CommentaryEntry)
+		m.commentaryErr = ""
 		// Start on the latest innings
 		innID := uint32(1)
 		numInnings := len(m.activeMatch.Scorecard)
@@ -129,28 +143,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.keyBuf = ""
 		m.screen = screenMatch
 		return m, tea.Batch(tickCmd(m.tickRate), commentaryCmd)
+	case matchLoadRequestedMsg:
+		if m.app == nil {
+			return m, func() tea.Msg {
+				return matchLoadedMsg{err: fmt.Errorf("match loading unavailable")}
+			}
+		}
+		m.cancelLoadMatch()
+		ctx, cancel := context.WithCancel(context.Background())
+		m.matchLoadCancel = cancel
+		return m, loadMatchCmd(m.app, ctx, msg.matchID, msg.shortName)
 	case matchRefreshedMsg:
+		m.matchRefreshCancel = nil
+		if msg.err != nil {
+			if errors.Is(msg.err, context.Canceled) {
+				return m, tickCmd(m.tickRate)
+			}
+			return m, tickCmd(m.tickRate)
+		}
 		if msg.err == nil && m.activeMatch != nil && msg.match.CricbuzzMatchID == m.activeMatch.CricbuzzMatchID {
 			msg.match.MatchShortName = m.activeMatch.MatchShortName
 			m.activeMatch = &msg.match
 		}
 		return m, tickCmd(m.tickRate)
 	case matchRefreshRequestedMsg:
+		if m.screen != screenMatch || m.activeMatch == nil || msg.matchID != m.activeMatch.CricbuzzMatchID {
+			return m, nil
+		}
 		if m.app == nil {
 			return m, func() tea.Msg {
 				return matchRefreshedMsg{err: fmt.Errorf("match refresh unavailable")}
 			}
 		}
-		return m, refreshMatchCmd(m.app, msg.matchID)
+		m.cancelMatchRefresh()
+		ctx, cancel := context.WithCancel(context.Background())
+		m.matchRefreshCancel = cancel
+		return m, refreshMatchCmd(m.app, ctx, msg.matchID)
 	case commentaryLoadRequestedMsg:
+		if m.screen != screenMatch || m.activeMatch == nil || msg.matchID != m.activeMatch.CricbuzzMatchID {
+			return m, nil
+		}
 		if m.app == nil {
 			return m, func() tea.Msg {
 				return commentaryLoadedMsg{inningsID: msg.inningsID, err: fmt.Errorf("commentary unavailable")}
 			}
 		}
-		return m, loadCommentaryCmd(m.app, msg.matchID, msg.inningsID)
+		m.cancelCommentaryLoad()
+		ctx, cancel := context.WithCancel(context.Background())
+		m.commentaryCancel = cancel
+		return m, loadCommentaryCmd(m.app, ctx, msg.matchID, msg.inningsID)
 	case commentaryLoadedMsg:
+		m.commentaryCancel = nil
 		if msg.err != nil {
+			if errors.Is(msg.err, context.Canceled) {
+				return m, nil
+			}
 			if uint32(m.currentInnings+1) == msg.inningsID {
 				m.commentaryErr = fmt.Sprintf("failed to load commentary: %v", msg.err)
 			}
@@ -185,6 +232,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keyQuit):
 		if m.screen == screenMatch {
+			m.cancelMatchRequests()
 			m.screen = screenList
 			m.activeMatch = nil
 			m.commentary = nil
@@ -194,9 +242,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.keyBuf = ""
 			return m, nil
 		}
+		m.cancelAllRequests()
 		return m, tea.Quit
 	case key.Matches(msg, keyEsc):
 		if m.screen == screenMatch {
+			m.cancelMatchRequests()
 			m.screen = screenList
 			m.activeMatch = nil
 			m.commentary = nil
@@ -206,6 +256,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.keyBuf = ""
 			return m, nil
 		}
+		m.cancelAllRequests()
 		return m, tea.Quit
 	}
 	switch m.screen {
@@ -218,6 +269,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.app == nil {
+		return m, nil
+	}
 	total := m.app.TotalMatches()
 	if total == 0 {
 		return m, nil
@@ -252,16 +306,7 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.loadingMatch = true
 		m.matchErr = ""
-		shortName := item.ShortName
-		matchID := item.MatchID
-		return m, func() tea.Msg {
-			info, err := m.app.LoadMatch(matchID)
-			if err != nil {
-				return matchLoadedMsg{err: err}
-			}
-			info.MatchShortName = shortName
-			return matchLoadedMsg{match: info}
-		}
+		return m, requestMatchLoadCmd(item.MatchID, item.ShortName)
 	}
 	return m, nil
 }
@@ -300,7 +345,7 @@ func (m Model) handleMatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		innID := uint32(m.currentInnings + 1)
 		return m, tea.Batch(
 			requestMatchRefreshCmd(matchID),
-			loadCommentaryCmd(m.app, matchID, innID),
+			requestCommentaryCmd(matchID, innID),
 		)
 	}
 
@@ -359,30 +404,81 @@ func requestCommentaryCmd(matchID, inningsID uint32) tea.Cmd {
 	}
 }
 
+func requestMatchLoadCmd(matchID uint32, shortName string) tea.Cmd {
+	return func() tea.Msg {
+		return matchLoadRequestedMsg{matchID: matchID, shortName: shortName}
+	}
+}
+
 func requestMatchRefreshCmd(matchID uint32) tea.Cmd {
 	return func() tea.Msg {
 		return matchRefreshRequestedMsg{matchID: matchID}
 	}
 }
 
-func refreshMatchCmd(a *app.App, matchID uint32) tea.Cmd {
+func loadMatchCmd(a *app.App, ctx context.Context, matchID uint32, shortName string) tea.Cmd {
+	return func() tea.Msg {
+		if a == nil {
+			return matchLoadedMsg{err: fmt.Errorf("match loading unavailable")}
+		}
+		info, err := a.LoadMatchWithContext(ctx, matchID)
+		if err != nil {
+			return matchLoadedMsg{err: err}
+		}
+		info.MatchShortName = shortName
+		return matchLoadedMsg{match: info}
+	}
+}
+
+func refreshMatchCmd(a *app.App, ctx context.Context, matchID uint32) tea.Cmd {
 	return func() tea.Msg {
 		if a == nil {
 			return matchRefreshedMsg{err: fmt.Errorf("match refresh unavailable")}
 		}
-		info, err := a.RefreshMatch(matchID)
+		info, err := a.RefreshMatchWithContext(ctx, matchID)
 		return matchRefreshedMsg{match: info, err: err}
 	}
 }
 
-func loadCommentaryCmd(a *app.App, matchID, inningsID uint32) tea.Cmd {
+func loadCommentaryCmd(a *app.App, ctx context.Context, matchID, inningsID uint32) tea.Cmd {
 	return func() tea.Msg {
 		if a == nil {
 			return commentaryLoadedMsg{inningsID: inningsID, err: fmt.Errorf("commentary unavailable")}
 		}
-		entries, err := a.LoadCommentary(matchID, inningsID)
+		entries, err := a.LoadCommentaryWithContext(ctx, matchID, inningsID)
 		return commentaryLoadedMsg{entries: entries, inningsID: inningsID, err: err}
 	}
+}
+
+func (m *Model) cancelLoadMatch() {
+	if m.matchLoadCancel != nil {
+		m.matchLoadCancel()
+		m.matchLoadCancel = nil
+	}
+}
+
+func (m *Model) cancelMatchRefresh() {
+	if m.matchRefreshCancel != nil {
+		m.matchRefreshCancel()
+		m.matchRefreshCancel = nil
+	}
+}
+
+func (m *Model) cancelCommentaryLoad() {
+	if m.commentaryCancel != nil {
+		m.commentaryCancel()
+		m.commentaryCancel = nil
+	}
+}
+
+func (m *Model) cancelMatchRequests() {
+	m.cancelMatchRefresh()
+	m.cancelCommentaryLoad()
+}
+
+func (m *Model) cancelAllRequests() {
+	m.cancelLoadMatch()
+	m.cancelMatchRequests()
 }
 
 func tickCmd(tickRate int) tea.Cmd {
